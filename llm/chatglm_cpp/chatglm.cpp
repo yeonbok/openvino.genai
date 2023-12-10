@@ -44,30 +44,61 @@ static double get_duration_ms_until_now(Time::time_point& startTime) {
 #define COMPILE_FROM_XML 1
 
 int main(int argc, char* argv[]) try {
-    if (argc != 5) {
-        throw std::runtime_error(std::string{"Usage: "} + argv[0] + " <openvino_model.xml> <tokenizer.xml> <detokenizer.xml> '<device>' ");
+    if (argc < 5 || argc > 6) {
+        throw std::runtime_error(std::string{"Usage: "} + argv[0] + " <openvino_model.xml> <tokenizer.xml> <detokenizer.xml> '<infer device>' <plugin_for_first_infer(default is same as infer device>)");
     }
-	
+    bool use_cpu_plugin_for_first_infer = false;
     std::cout << ov::get_openvino_version() << std::endl;
-	
+    auto model = argv[1];
+    auto tokenizer_model = argv[2];
+    auto detokenizer_model = argv[3];
+    auto default_device = argv[4];
+    auto first_infer_device = argv[5];
+    if (argc == 6) {
+        use_cpu_plugin_for_first_infer = (std::string(first_infer_device) == "CPU");
+    }
+
+
     ov::Core core;
     core.add_extension(USER_OV_EXTENSIONS_PATH);  // USER_OV_EXTENSIONS_PATH is defined in root CMakeLists.txt
-    ov::InferRequest tokenizer = core.compile_model(argv[2], "CPU").create_infer_request();
+    ov::InferRequest tokenizer = core.compile_model(tokenizer_model, "CPU").create_infer_request();
     auto input_ids = tokenizer.get_tensor("input_ids");
     auto attention_mask = tokenizer.get_tensor("attention_mask");
-    ov::InferRequest detokenizer = core.compile_model(argv[3], "CPU").create_infer_request();
+    ov::InferRequest detokenizer = core.compile_model(detokenizer_model, "CPU").create_infer_request();
     constexpr size_t BATCH_SIZE = 1;
 
     double total_time = 0;
     int count = 0;
     auto startTime = Time::now();
-    ov::CompiledModel compilemodel = core.compile_model(argv[1], argv[4], ov::cache_dir("llm-cache"));
-    ov::InferRequest ireq = compilemodel.create_infer_request();
-    auto inputs = compilemodel.inputs();
+    ov::CompiledModel compilemodel = core.compile_model(model, default_device, ov::cache_dir("tmp_cache"));
     auto duration_ms = get_duration_ms_until_now(startTime);
-    std::cout << "Compile LLM model took " << duration_ms << " ms" << std::endl;
-   
-    for (std::string input_text : sentences) {
+    std::cout << "[" << default_device << "] Compile LLM model took " << duration_ms << " ms" << std::endl;
+
+    // Extra cpu plugin for first inference
+    ov::CompiledModel compilemodel_cpu;
+    ov::InferRequest ireq_cpu;
+    if (use_cpu_plugin_for_first_infer) {
+        auto startTime = Time::now();
+        compilemodel_cpu = std::move(core.compile_model(model, first_infer_device, ov::cache_dir("")));
+        auto duration_ms = get_duration_ms_until_now(startTime);
+        std::cout << "[" << first_infer_device << "] Compile LLM model took " << duration_ms << " ms" << std::endl;
+    }
+    ov::InferRequest ireq = compilemodel.create_infer_request();
+    if (use_cpu_plugin_for_first_infer) {
+        ireq_cpu = std::move(compilemodel_cpu.create_infer_request());
+    }
+
+    auto inputs = use_cpu_plugin_for_first_infer ? compilemodel_cpu.inputs() : compilemodel.inputs();
+
+    int selected_input = -1;
+    if (std::getenv("INPUT_ID") != nullptr) {
+        selected_input = std::atoi(std::getenv("INPUT_ID"));
+        std::cout << "Run selected input " << selected_input << std::endl;
+    } else {
+        std::cout << "Run all input " << selected_input << std::endl;
+    }
+    for (int s = 0; s < (selected_input > 0 ? 1 : sizeof(sentences)); ++s) {
+        const auto& input_text = selected_input < 0 ? sentences[s] : sentences[selected_input];
         total_time = 0;
         count = 0;
         auto prompt_text ="<|user|> " + input_text + " <|assitant|>";
@@ -83,48 +114,83 @@ int main(int argc, char* argv[]) try {
                 {
                     ov::PartialShape shape = input.get_partial_shape().get_min_shape();
                     shape[1] = BATCH_SIZE;
-                    ireq.get_tensor(input).set_shape(shape.get_shape());
+                    use_cpu_plugin_for_first_infer ? ireq_cpu.get_tensor(input).set_shape(shape.get_shape()) : ireq.get_tensor(input).set_shape(shape.get_shape());;
                     break;
                 }
             }
         }
+        size_t vocab_size;
+        float* logits;
+        int64_t out_token;
+        if (use_cpu_plugin_for_first_infer) {
+            ireq_cpu.get_tensor("input_ids").set_shape(input_ids.get_shape());  // TODO: replace with ireq.set_tensor("input_ids", input_ids); after it's fixed
+            ireq_cpu.get_tensor("attention_mask").set_shape(attention_mask.get_shape());
+            std::copy_n(input_ids.data<const int64_t>(), input_ids.get_size(), ireq_cpu.get_tensor("input_ids").data<int64_t>());
+            std::fill_n(ireq_cpu.get_tensor("attention_mask").data<int64_t>(), attention_mask.get_size(), 1);
+            ireq_cpu.get_tensor("position_ids").set_shape(input_ids.get_shape());
+            std::iota(ireq_cpu.get_tensor("position_ids").data<int64_t>(), ireq_cpu.get_tensor("position_ids").data<int64_t>() + ireq_cpu.get_tensor("position_ids").get_size(), 0);
 
-        ireq.get_tensor("input_ids").set_shape(input_ids.get_shape());  // TODO: replace with ireq.set_tensor("input_ids", input_ids); after it's fixed
-        ireq.get_tensor("attention_mask").set_shape(attention_mask.get_shape());
-        std::copy_n(input_ids.data<const int64_t>(), input_ids.get_size(), ireq.get_tensor("input_ids").data<int64_t>());
-        std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), attention_mask.get_size(), 1);
-        ireq.get_tensor("position_ids").set_shape(input_ids.get_shape());
-        std::iota(ireq.get_tensor("position_ids").data<int64_t>(), ireq.get_tensor("position_ids").data<int64_t>() + ireq.get_tensor("position_ids").get_size(), 0);
+            startTime = Time::now();
+            ireq_cpu.infer();
+            duration_ms = get_duration_ms_until_now(startTime);
+            std::cout << "First token took " << duration_ms << " ms" << " (" << first_infer_device << ")" << std::endl;
 
-        startTime = Time::now();
-        ireq.infer();
-        duration_ms = get_duration_ms_until_now(startTime);
-        std::cout << "First token took " << duration_ms << " ms" << std::endl;
+            vocab_size = ireq_cpu.get_tensor("logits").get_shape().back();
+            logits = ireq_cpu.get_tensor("logits").data<float>() + (input_ids.get_size() - 1) * vocab_size;
+            out_token = std::max_element(logits, logits + vocab_size) - logits;
+        } else {
+            ireq.get_tensor("input_ids").set_shape(input_ids.get_shape());  // TODO: replace with ireq.set_tensor("input_ids", input_ids); after it's fixed
+            ireq.get_tensor("attention_mask").set_shape(attention_mask.get_shape());
+            std::copy_n(input_ids.data<const int64_t>(), input_ids.get_size(), ireq.get_tensor("input_ids").data<int64_t>());
+            std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), attention_mask.get_size(), 1);
+            ireq.get_tensor("position_ids").set_shape(input_ids.get_shape());
+            std::iota(ireq.get_tensor("position_ids").data<int64_t>(), ireq.get_tensor("position_ids").data<int64_t>() + ireq.get_tensor("position_ids").get_size(), 0);
 
-        size_t vocab_size = ireq.get_tensor("logits").get_shape().back();
-        float* logits = ireq.get_tensor("logits").data<float>() + (input_ids.get_size() - 1) * vocab_size;
-        int64_t out_token = std::max_element(logits, logits + vocab_size) - logits;
+            startTime = Time::now();
+            ireq.infer();
+            duration_ms = get_duration_ms_until_now(startTime);
+            std::cout << "First token took " << duration_ms << " ms" << " (" << default_device << ")" << std::endl;
 
+            vocab_size = ireq.get_tensor("logits").get_shape().back();
+            logits = ireq.get_tensor("logits").data<float>() + (input_ids.get_size() - 1) * vocab_size;
+            out_token = std::max_element(logits, logits + vocab_size) - logits;
+        }
         ireq.get_tensor("input_ids").set_shape({ BATCH_SIZE, 1 });
         ireq.get_tensor("position_ids").set_shape({ BATCH_SIZE, 1 });
 
         constexpr int64_t SPECIAL_EOS_TOKEN = 2;  // There's no way to extract the value from the detokenizer for now
-        while (out_token != SPECIAL_EOS_TOKEN) {
+        //while (out_token != SPECIAL_EOS_TOKEN) {
+        int gen_count = -1;
+        if (std::getenv("GEN_COUNT") != nullptr) {
+            gen_count = std::atoi(std::getenv("GEN_COUNT"));
+            std::cout << "Generate " << gen_count << "tokens" << std::endl;
+        } else {
+            std::cout << "Generate tokens as many as possible" << std::endl;
+        }
+        while (gen_count > 0 ? count < gen_count : out_token != SPECIAL_EOS_TOKEN) {
             startTime = Time::now();
             ireq.get_tensor("input_ids").data<int64_t>()[0] = out_token;
-            ireq.get_tensor("attention_mask").set_shape({ BATCH_SIZE, ireq.get_tensor("attention_mask").get_shape()[1] + 1 });
-            std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), ireq.get_tensor("attention_mask").get_size(), 1);
-            ireq.get_tensor("position_ids").data<int64_t>()[0] = ireq.get_tensor("attention_mask").get_size() - 2;
+            if (count == 0 && use_cpu_plugin_for_first_infer) {
+                ireq.get_tensor("attention_mask").set_shape({ BATCH_SIZE, ireq_cpu.get_tensor("attention_mask").get_shape()[1] + 1 });
+                std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), ireq_cpu.get_tensor("attention_mask").get_size(), 1);
+                ireq.get_tensor("position_ids").data<int64_t>()[0] = ireq_cpu.get_tensor("attention_mask").get_size() - 2;
+            } else {
+                ireq.get_tensor("attention_mask").set_shape({ BATCH_SIZE, ireq.get_tensor("attention_mask").get_shape()[1] + 1 });
+                std::fill_n(ireq.get_tensor("attention_mask").data<int64_t>(), ireq.get_tensor("attention_mask").get_size(), 1);
+                ireq.get_tensor("position_ids").data<int64_t>()[0] = ireq.get_tensor("attention_mask").get_size() - 2;
+            }
             for (auto& input : inputs) {
                 for (const std::string& name : input.get_names()) {
                     if (name.rfind("past_key_values", 0) == 0)
                     {
-                        ireq.set_tensor(input, ireq.get_tensor("present" + name.substr(15)));
+                        if (count == 0 && use_cpu_plugin_for_first_infer)
+                            ireq.set_tensor(input, ireq_cpu.get_tensor("present" + name.substr(15)));
+                        else
+                            ireq.set_tensor(input, ireq.get_tensor("present" + name.substr(15)));
                         break;
                     }
                 }
             }
-
             ireq.start_async();
             ireq.wait();
             duration_ms = get_duration_ms_until_now(startTime);
@@ -138,8 +204,10 @@ int main(int argc, char* argv[]) try {
         std::cout << '\n';
 
         if (count > 0) {
-            std::cout << "Other Avg inference took total " << total_time << " ms token num " << count << " avg " << total_time / (count) << " ms" << std::endl;
+            std::cout << "[" << default_device << "] Other Avg inference took total " << total_time << " ms token num " << count << " avg " << total_time / (count) << " ms" << std::endl;
         }
+        if (std::getenv("INPUT_ID") != nullptr)
+            break;
     }
 } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
