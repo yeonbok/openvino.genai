@@ -27,7 +27,8 @@
 typedef std::chrono::high_resolution_clock Time;
 typedef std::chrono::nanoseconds ns;
 
-const std::string sentences[] =
+const int NUM_SENTENCES = 10;
+const std::string sentences[NUM_SENTENCES] =
 {
     //"my pc sound is too low",
     "What is OpenVINO?",
@@ -56,6 +57,8 @@ struct Args {
     float temp = 0.95;
     float repeat_penalty = 1.0;
     int output_fixed_len = 0;
+    std::vector<int32_t> selected_inputs;
+    bool print_inputs_info = false;
 };
 
 static void usage(const std::string& prog) {
@@ -73,7 +76,9 @@ static void usage(const std::string& prog) {
         << "  --top_p N               top-p sampling (default: 0.7)\n"
         << "  --temp N                temperature (default: 0.95)\n"
         << "  --repeat_penalty N      penalize repeat sequence of tokens (default: 1.0, 1.0 = disabled)\n"
-        << "  --output_fixed_len N    set output fixed lenth (default: 0, output lenth is determined by the model)\n";
+        << "  --output_fixed_len N    set output fixed lenth (default: 0, output lenth is determined by the model)\n"
+        << "  --print_inputs_info      print inputs id and token length (default: false)\n"
+        << "  --select_inputs         set input ids to run with comma separated list (ex: \"1,3,1,3\")\n";
 }
 
 static Args parse_args(const std::vector<std::string>& argv) {
@@ -118,6 +123,27 @@ static Args parse_args(const std::vector<std::string>& argv) {
         }
         else if (arg == "--output_fixed_len") {
             args.output_fixed_len = std::stoi(argv[++i]);
+        }
+        else if (arg == "--select_inputs") {
+            std::string inputs_str = argv[++i];
+            auto get_input_indices = [&]() {
+                std::vector<int> input_ids;
+                size_t pos_begin = 0;
+                size_t pos_end = 0;
+                while((pos_end = inputs_str.find(",", pos_begin)) != std::string::npos) {
+                   std::string id_str = inputs_str.substr(pos_begin, (pos_end - pos_begin));
+                   args.selected_inputs.push_back(std::stoi(id_str));
+                   pos_begin = pos_end + 1;
+                }
+                std::string id_str = inputs_str.substr(pos_begin);
+                args.selected_inputs.push_back(std::stoi(id_str));
+            };
+            get_input_indices();
+            std::cout << "Selected input indices : " << std::endl;
+            for (auto i : args.selected_inputs) {
+                std::cout << i << " ";
+            }
+            std::cout << std::endl;
         }
         else {
             std::cerr << "Unknown argument: " << arg << std::endl;
@@ -438,11 +464,19 @@ int main(int argc, char* argv[]) try {
     auto model_inputs = compilemodel.inputs();
     auto inputs = compilemodel.inputs();
     TextStreamer text_streamer{ std::move(detokenizer) };
-	
+    std::vector<int32_t> sentences_to_run;
+    if (args.selected_inputs.size() > 0)
+        sentences_to_run = args.selected_inputs;
+    else {
+        for (size_t i = 0; i < NUM_SENTENCES; ++i)
+            sentences_to_run.push_back(i);
+    }
+
     // input length, output length, first time, other time
     std::vector<std::tuple<size_t, size_t, double, double>> perf_records;
 
-    for (std::string input_text : sentences) {
+    for (int32_t input_id : sentences_to_run) {
+        auto input_text = sentences[input_id];
         total_time = 0;
         count = 0;
         auto prompt_text = "<用户>" + input_text + " <AI>"; //minicpm
