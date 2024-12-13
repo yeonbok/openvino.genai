@@ -102,8 +102,10 @@ std::pair<EncodedResults, int32_t> get_lm_encoded_results(
     raw_perf_counters.m_token_infer_durations.emplace_back(infer_ms);
     raw_perf_counters.m_new_token_times.emplace_back(infer_end);
     raw_perf_counters.m_batch_sizes.emplace_back(batch_size);
+    std::cout << "0, Generate, " << infer_ms << ", mcs " << std::endl;
 
     auto logits = m_llm.get_tensor("logits");
+//    std::cout << "####################### first token output shape: " << logits.get_shape().to_string() << std::endl;
 
     int64_t sequence_len = logits.get_shape().at(1);
     for (auto& sequence_group : sequence_groups) {
@@ -126,6 +128,7 @@ std::pair<EncodedResults, int32_t> get_lm_encoded_results(
                                                 get_active_sequence_groups),
                                  active_sequence_groups.end());
 
+    int n = 0;
     while (active_sequence_groups.size() > 0) {
         size_t total_num_tokens = 0;
 
@@ -175,7 +178,11 @@ std::pair<EncodedResults, int32_t> get_lm_encoded_results(
         }
 
         if (m_embedding.has_value()) {
+            auto embed_start_time = std::chrono::steady_clock::now();
             const ov::Tensor& embed_prompt_tensor = (*m_embedding).infer(new_input_ids);
+            auto embed_end_time = std::chrono::steady_clock::now();
+            auto embed_total_time = std::chrono::duration_cast<std::chrono::microseconds>(embed_end_time - embed_start_time).count();
+            std::cout << n << ", Embedding," << embed_total_time << ", mcs " << std::endl;
 
             m_llm.get_tensor("inputs_embeds").set_shape(embed_prompt_tensor.get_shape());
             m_llm.set_tensor("inputs_embeds", embed_prompt_tensor);
@@ -201,13 +208,14 @@ std::pair<EncodedResults, int32_t> get_lm_encoded_results(
         raw_perf_counters.m_token_infer_durations.emplace_back(infer_ms);
         raw_perf_counters.m_new_token_times.emplace_back(infer_end);
         raw_perf_counters.m_batch_sizes.emplace_back(batch_size);
+        std::cout << n++ << ", Generate," << infer_ms << ", mcs " << std::endl;
 
         if (streamer_ptr) {
             // stream data from first sequence
             int64_t out_token = sequence_groups.at(0).get()->operator[](0)->get_generated_ids().back();
-            if (streamer_ptr->put(out_token)) {
-                break;
-            }
+//            if (streamer_ptr->put(out_token)) {
+//                break;
+//            }
         }
 
         sampler_output = sampler.sample(active_sequence_groups, m_llm.get_tensor("logits"));

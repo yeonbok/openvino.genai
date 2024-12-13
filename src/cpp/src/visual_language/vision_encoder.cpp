@@ -705,6 +705,7 @@ EncodedImage VisionEncoder::encode_llava(const ov::Tensor& image, const Processo
 
     const ov::Tensor& infer_output = m_vision_encoder.get_output_tensor();
     ov::Tensor image_features(infer_output.get_element_type(), infer_output.get_shape());
+    std::cout << "Encode llava for a image => " << infer_output.get_shape().to_string() << std::endl;
     std::memcpy(image_features.data(), infer_output.data(), infer_output.get_byte_size());
 
     ImageSize resized_source_size{config.crop_size_height / config.patch_size, config.crop_size_width / config.patch_size};

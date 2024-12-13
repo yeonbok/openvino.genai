@@ -117,7 +117,9 @@ protected:
             device,
             device_config
         ),
-        m_tokenizer(tokenizer) { }
+        m_tokenizer(tokenizer) {
+            std::cout << __FILE__ << " InputsEmbedder : " << __LINE__ << " device = " << device << std::endl;
+        }
 
     ov::Tensor get_encoded_input_ids(const std::string& prompt, ov::genai::VLMPerfMetrics& metrics, const std::string& chat_template_fallback = "") {
         ov::Tensor encoded_input_ids;
@@ -255,7 +257,6 @@ public:
         std::vector<EncodedImage> embeds;
 
         std::vector<ov::Tensor> single_images = to_single_image_tensors(images);
-
         for (const ov::Tensor& image : single_images) {
             EncodedImage encoded_image = m_vision_encoder.encode(image);
             if (m_vlm_config.use_image_id) {
@@ -559,15 +560,28 @@ public:
         std::vector<ov::Tensor> image_embeds;
         image_embeds.reserve(single_images.size());
 
+        int i = 0;
         for (const auto& image : single_images) {
+            // ######################## vision encoder start
+            auto vision_encoder_start_time = std::chrono::steady_clock::now();
             EncodedImage encoded_image = m_vision_encoder.encode(image);
+            auto vision_encoder_end_time = std::chrono::steady_clock::now();
+            auto vision_encoder_total_time = std::chrono::duration_cast<std::chrono::microseconds>(vision_encoder_end_time - vision_encoder_start_time).count();
+            std::cout << i << ", Vision encoder, " << vision_encoder_total_time << ", mcs " << std::endl;
+            // ######################## vision encoder end
             image_embeds.push_back(std::move(encoded_image.resized_source));
             formatted_prompt += image_token + "\n";
         }
         formatted_prompt += prompt;
 
         ov::Tensor input_ids = get_encoded_input_ids(formatted_prompt, metrics, chat_template_fallback);
+        // ########################  embedding start
+        auto embed_start_time = std::chrono::steady_clock::now();
         ov::Tensor text_embeds = m_embedding.infer(input_ids);
+        auto embed_end_time = std::chrono::steady_clock::now();
+        auto embed_total_time = std::chrono::duration_cast<std::chrono::microseconds>(embed_end_time - embed_start_time).count();
+        std::cout << "0, Embedding," << embed_total_time << ", mcs " << std::endl;
+        // ######################## embedding end
 
         if (images.empty()) {
             return text_embeds;
@@ -674,10 +688,13 @@ public:
         image_embeds.reserve(single_images.size());
         
         ov::Tensor image_newline;
-
+        int img = 0;
         for (const auto& image : single_images) {
+            auto vision_encoder_start_time = std::chrono::steady_clock::now();
             EncodedImage encoded_image = m_vision_encoder.encode(image);
-
+            auto vision_encoder_end_time = std::chrono::steady_clock::now();
+            auto vision_encoder_total_time = std::chrono::duration_cast<std::chrono::microseconds>(vision_encoder_end_time - vision_encoder_start_time).count();
+            std::cout << img++ << ", Vision encoder, " << vision_encoder_total_time << ", mcs " << std::endl;
             if (!image_newline) {
                 size_t embed_dim = encoded_image.resized_source.get_shape().at(2);
                 image_newline = ov::Tensor(encoded_image.resized_source.get_element_type(), {embed_dim});
@@ -695,7 +712,11 @@ public:
         formatted_prompt += prompt;
 
         ov::Tensor input_ids = get_encoded_input_ids(formatted_prompt, metrics, chat_template_fallback);
+        auto embed_start_time = std::chrono::steady_clock::now();
         ov::Tensor text_embeds = m_embedding.infer(input_ids);
+        auto embed_end_time = std::chrono::steady_clock::now();
+        auto embed_total_time = std::chrono::duration_cast<std::chrono::microseconds>(embed_end_time - embed_start_time).count();
+        std::cout << "0, Embedding," << embed_total_time << ", mcs " << std::endl;
 
         if (images.empty()) {
             return text_embeds;
@@ -1000,10 +1021,15 @@ public:
         std::vector<ov::Tensor> image_embeds;
         image_embeds.reserve(single_images.size());
         
+        int img = 0;
         for (const auto& image : single_images) {
+            auto vision_encoder_start_time = std::chrono::steady_clock::now();
             EncodedImage encoded_image = m_vision_encoder.encode(image);
+            auto vision_encoder_end_time = std::chrono::steady_clock::now();
+            auto vision_encoder_total_time = std::chrono::duration_cast<std::chrono::microseconds>(vision_encoder_end_time - vision_encoder_start_time).count();
             ov::Tensor single_image_embeds = encoded_image.resized_source;
-
+            std::cout << img << ", Vision encoder, " << vision_encoder_total_time << ", mcs " << std::endl;
+            img++;
             const size_t num_patches = single_image_embeds.get_shape().at(0);
             const size_t num_image_tokens = single_image_embeds.get_shape().at(1);
             
@@ -1018,7 +1044,11 @@ public:
         formatted_prompt += prompt;
 
         ov::Tensor input_ids = get_encoded_input_ids(formatted_prompt, metrics);
+        auto embed_start_time = std::chrono::steady_clock::now();
         ov::Tensor text_embeds = m_embedding.infer(input_ids);
+        auto embed_end_time = std::chrono::steady_clock::now();
+        auto embed_total_time = std::chrono::duration_cast<std::chrono::microseconds>(embed_end_time - embed_start_time).count();
+        std::cout << "0, Embedding," << embed_total_time << ", mcs " << std::endl;
 
         if (images.empty()) {
             return text_embeds;

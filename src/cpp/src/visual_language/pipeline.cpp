@@ -81,6 +81,7 @@ public:
             )
         },
         m_is_chat_conversation{false} {
+//        std::cout << __FILE__ << " : " << __LINE__ << " device = " << device << std::endl; // here
         m_inputs_embedder = std::make_shared<InputsEmbedder>(
             m_vlm_config, models_dir, device, properties);
 
@@ -149,9 +150,11 @@ public:
             generation_config.set_eos_token_id(m_generation_config.eos_token_id);
         generation_config.validate();
 
+        std::cout << "####################### START: get_inputs_embeds() " << std::endl;
         auto start_get_inputs_embeds = std::chrono::steady_clock::now();
         ov::Tensor inputs_embeds = m_inputs_embedder->get_inputs_embeds(prompt, rgbs, perf_metrics);
         auto end_get_inputs_embeds = std::chrono::steady_clock::now();
+        std::cout << "####################### END: get_input_embeds() " << std::endl;
 
         Sampler sampler = Sampler(m_tokenizer);
 
@@ -303,6 +306,7 @@ VLMPipeline::VLMPipeline(
     const ov::AnyMap& properties
 ) {
     auto start_time = std::chrono::steady_clock::now();
+
     m_pimpl = std::make_unique<VLMPipelineImpl>(models_dir, device, properties);
     auto stop_time = std::chrono::steady_clock::now();
     m_pimpl->m_load_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop_time - start_time).count();
